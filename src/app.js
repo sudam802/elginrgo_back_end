@@ -56,7 +56,8 @@ app.use("/uploads", express.static(uploadsDir));
 
 // ---------------- SESSION ----------------
 const cookieSameSiteRaw = (process.env.SESSION_SAMESITE || (isProd ? "none" : "lax")).toLowerCase();
-const cookieSameSite =
+const cookieSameSite = isProd ? "none" : "lax";
+
   cookieSameSiteRaw === "none" || cookieSameSiteRaw === "lax" || cookieSameSiteRaw === "strict"
     ? cookieSameSiteRaw
     : isProd
