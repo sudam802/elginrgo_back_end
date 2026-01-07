@@ -55,14 +55,8 @@ fs.mkdirSync(uploadsDir, { recursive: true });
 app.use("/uploads", express.static(uploadsDir));
 
 // ---------------- SESSION ----------------
-const cookieSameSiteRaw = (process.env.SESSION_SAMESITE || (isProd ? "none" : "lax")).toLowerCase();
 const cookieSameSite = isProd ? "none" : "lax";
 
-  cookieSameSiteRaw === "none" || cookieSameSiteRaw === "lax" || cookieSameSiteRaw === "strict"
-    ? cookieSameSiteRaw
-    : isProd
-      ? "none"
-      : "lax";
 
 app.use(
   session({
