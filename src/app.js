@@ -27,6 +27,8 @@ const isProd = process.env.NODE_ENV === "production";
 const FRONTEND_URL = process.env.FRONTEND_URL || (isProd ? "" : "http://localhost:3000");
 const SESSION_SECRET = process.env.SESSION_SECRET || "change_this_secret";
 const MONGO_URI = process.env.MONGO_URI;
+const DEBUG_HTTP = String(process.env.DEBUG_HTTP || "").toLowerCase() === "true";
+const DEBUG_CORS = String(process.env.DEBUG_CORS || "").toLowerCase() === "true";
 
 function normalizeOrigin(value) {
   const raw = typeof value === "string" ? value.trim() : "";
@@ -44,6 +46,27 @@ if (isProd) {
   // Required for secure cookies behind Render/other proxies
   app.set("trust proxy", 1);
 }
+
+if (DEBUG_HTTP) {
+  app.use((req, res, next) => {
+    const startedAt = Date.now();
+    const origin = req.get("origin") || "-";
+    const referer = req.get("referer") || "-";
+    const ua = req.get("user-agent") || "-";
+    const hasCookie = Boolean(req.headers.cookie);
+    const hasAuth = Boolean(req.headers.authorization);
+    console.log(
+      `[HTTP] --> ${req.method} ${req.originalUrl} origin=${origin} referer=${referer} cookie=${hasCookie} auth=${hasAuth} ua=${ua}`
+    );
+    res.on("finish", () => {
+      console.log(
+        `[HTTP] <-- ${res.statusCode} ${req.method} ${req.originalUrl} ${Date.now() - startedAt}ms`
+      );
+    });
+    next();
+  });
+}
+
 const rawFrontendUrls = String(process.env.FRONTEND_URLS || FRONTEND_URL || "").trim();
 const frontendOrigins = rawFrontendUrls
   ? rawFrontendUrls
@@ -64,16 +87,33 @@ app.use(
   cors({
     origin: (origin, callback) => {
       // Non-browser clients (curl/postman) often send no Origin; allow those.
-      if (!origin) return callback(null, true);
+      if (!origin) {
+        if (DEBUG_CORS) console.log(`[CORS] origin=<none> allow=true`);
+        return callback(null, true);
+      }
 
       // In dev, reflect the requesting origin to avoid localhost/port mismatches.
-      if (!isProd) return callback(null, true);
+      if (!isProd) {
+        if (DEBUG_CORS) console.log(`[CORS] origin=${origin} allow=true (dev)`);
+        return callback(null, true);
+      }
 
-      if (corsAllowAll) return callback(null, true);
+      if (corsAllowAll) {
+        if (DEBUG_CORS) console.log(`[CORS] origin=${origin} allow=true (allow-all)`);
+        return callback(null, true);
+      }
 
       const normalized = normalizeOrigin(origin) || origin;
       if (frontendOrigins.includes("*") || frontendOrigins.includes(normalized)) {
+        if (DEBUG_CORS) console.log(`[CORS] origin=${origin} normalized=${normalized} allow=true`);
         return callback(null, true);
+      }
+      if (DEBUG_CORS) {
+        console.log(
+          `[CORS] origin=${origin} normalized=${normalized} allow=false allowed=[${frontendOrigins.join(
+            ", "
+          )}]`
+        );
       }
       return callback(null, false);
     },
