@@ -82,6 +82,13 @@ if (isProd && corsAllowAll) {
     "⚠️  CORS: allowing all origins because FRONTEND_URLS/FRONTEND_URL is not set (set FRONTEND_URLS to lock this down)."
   );
 }
+if (DEBUG_CORS) {
+  console.log(
+    `[CORS] mode=${isProd ? "prod" : "dev"} allowAll=${corsAllowAll} allowed=[${frontendOrigins.join(
+      ", "
+    )}]`
+  );
+}
 
 app.use(
   cors({
