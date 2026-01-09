@@ -1,6 +1,8 @@
 import express from "express";
 import bcrypt from "bcryptjs";
 import User from "../models/User.js";
+import { requireAuth } from "../middleware/authMiddleware.js";
+import { signAuthToken } from "../utils/jwt.js";
 
 const router = express.Router();
 
@@ -96,6 +98,7 @@ router.post("/register", async (req, res) => {
 
     res.status(201).json({
       message: "User registered successfully",
+      token: signAuthToken(user._id),
       user: {
         id: user._id,
         fullName: user.fullName,
@@ -129,6 +132,7 @@ router.post("/login", async (req, res) => {
 
     res.json({
       message: "Login successful",
+      token: signAuthToken(user._id),
       user: {
         id: user._id,
         fullName: user.fullName,
@@ -153,12 +157,9 @@ router.post("/logout", (req, res) => {
   });
 });
 
-router.get("/me", async (req, res) => {
+router.get("/me", requireAuth, async (req, res) => {
   try {
-    if (!req.session || !req.session.userId) {
-      return res.status(401).json({ message: "Not authenticated" });
-    }
-
+    const userId = req.session.userId;
     const user = await User.findById(req.session.userId).select(
       "fullName username email location locationGeo preferredSports skillLevel"
     );
@@ -166,7 +167,7 @@ router.get("/me", async (req, res) => {
 
     res.json({
       user: {
-        id: user._id,
+        id: userId,
         fullName: user.fullName,
         username: user.username,
         email: user.email,

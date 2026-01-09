@@ -23,24 +23,60 @@ dotenv.config({ path: path.resolve(__dirname, "../.env") }); // load back_end/.e
 // ---------------- CONFIG ----------------
 const app = express();
 const PORT = process.env.PORT || 5000;
-const FRONTEND_URL = process.env.FRONTEND_URL || "http://localhost:3000";
+const isProd = process.env.NODE_ENV === "production";
+const FRONTEND_URL = process.env.FRONTEND_URL || (isProd ? "" : "http://localhost:3000");
 const SESSION_SECRET = process.env.SESSION_SECRET || "change_this_secret";
 const MONGO_URI = process.env.MONGO_URI;
 
+function normalizeOrigin(value) {
+  const raw = typeof value === "string" ? value.trim() : "";
+  if (!raw) return null;
+  if (raw === "*") return "*";
+  try {
+    return new URL(raw).origin;
+  } catch {
+    return raw.replace(/\/+$/, "");
+  }
+}
+
 // ---------------- MIDDLEWARE ----------------
-const isProd = process.env.NODE_ENV === "production";
 if (isProd) {
   // Required for secure cookies behind Render/other proxies
   app.set("trust proxy", 1);
 }
-const frontendOrigins = (process.env.FRONTEND_URLS || FRONTEND_URL)
-  .split(",")
-  .map((s) => s.trim())
-  .filter(Boolean);
+const rawFrontendUrls = String(process.env.FRONTEND_URLS || FRONTEND_URL || "").trim();
+const frontendOrigins = rawFrontendUrls
+  ? rawFrontendUrls
+      .split(",")
+      .map(normalizeOrigin)
+      .filter(Boolean)
+  : [];
+const corsAllowAll =
+  String(process.env.CORS_ALLOW_ALL || "").toLowerCase() === "true" ||
+  (isProd && frontendOrigins.length === 0);
+if (isProd && corsAllowAll) {
+  console.warn(
+    "⚠️  CORS: allowing all origins because FRONTEND_URLS/FRONTEND_URL is not set (set FRONTEND_URLS to lock this down)."
+  );
+}
 
 app.use(
   cors({
-    origin: isProd ? frontendOrigins : true, // reflect origin in dev to avoid localhost/port mismatches
+    origin: (origin, callback) => {
+      // Non-browser clients (curl/postman) often send no Origin; allow those.
+      if (!origin) return callback(null, true);
+
+      // In dev, reflect the requesting origin to avoid localhost/port mismatches.
+      if (!isProd) return callback(null, true);
+
+      if (corsAllowAll) return callback(null, true);
+
+      const normalized = normalizeOrigin(origin) || origin;
+      if (frontendOrigins.includes("*") || frontendOrigins.includes(normalized)) {
+        return callback(null, true);
+      }
+      return callback(null, false);
+    },
     credentials: true, // allow cookies/sessions to be sent
   })
 );
