@@ -221,34 +221,70 @@ router.get("/suggestions", requireAuth, async (req, res) => {
       _id: { $nin: Array.from(excluded).filter((id) => mongoose.Types.ObjectId.isValid(id)) },
     };
 
-    const query = preferred.length
-      ? { ...baseQuery, preferredSports: { $in: preferred } }
-      : baseQuery;
+    const suggestions = [];
+    const pickedIds = new Set();
 
-    const candidates = await User.find(query)
-      .select("username fullName location preferredSports skillLevel createdAt")
-      .limit(50)
-      .lean();
+    // 1) Prefer matches by overlapping preferred sports (when available)
+    if (preferred.length) {
+      const candidates = await User.find({ ...baseQuery, preferredSports: { $in: preferred } })
+        .select("username fullName location preferredSports skillLevel createdAt")
+        .limit(50)
+        .lean();
 
-    const scored = candidates
-      .map((u) => {
-        const sports = Array.isArray(u.preferredSports) ? u.preferredSports.map(String) : [];
-        const overlap = preferred.length
-          ? sports.filter((s) => preferred.includes(s)).length
-          : 0;
-        const skillBonus = skillLevel && String(u.skillLevel) === skillLevel ? 1 : 0;
-        return { user: u, score: overlap * 10 + skillBonus };
-      })
-      .sort((a, b) => {
-        if (b.score !== a.score) return b.score - a.score;
-        const bt = new Date(b.user.createdAt ?? 0).getTime();
-        const at = new Date(a.user.createdAt ?? 0).getTime();
-        return bt - at;
-      })
-      .slice(0, limit)
-      .map((x) => publicSuggestionUser(x.user));
+      const scored = candidates
+        .map((u) => {
+          const sports = Array.isArray(u.preferredSports) ? u.preferredSports.map(String) : [];
+          const overlap = sports.filter((s) => preferred.includes(s)).length;
+          const skillBonus = skillLevel && String(u.skillLevel) === skillLevel ? 1 : 0;
+          return { user: u, score: overlap * 10 + skillBonus };
+        })
+        .sort((a, b) => {
+          if (b.score !== a.score) return b.score - a.score;
+          const bt = new Date(b.user.createdAt ?? 0).getTime();
+          const at = new Date(a.user.createdAt ?? 0).getTime();
+          return bt - at;
+        });
 
-    return res.json({ suggestions: scored });
+      for (const x of scored) {
+        const id = toIdString(x.user?._id);
+        if (!id || pickedIds.has(id)) continue;
+        pickedIds.add(id);
+        suggestions.push(publicSuggestionUser(x.user));
+        if (suggestions.length >= limit) break;
+      }
+    }
+
+    // 2) If not enough matches, fill with newest users (still excluding friends/requests)
+    if (suggestions.length < limit) {
+      const remaining = limit - suggestions.length;
+      const fillQuery = {
+        ...baseQuery,
+        _id: {
+          $nin: Array.from(
+            new Set([
+              ...Array.from(excluded).filter((id) => mongoose.Types.ObjectId.isValid(id)),
+              ...Array.from(pickedIds).filter((id) => mongoose.Types.ObjectId.isValid(id)),
+            ])
+          ),
+        },
+      };
+
+      const recent = await User.find(fillQuery)
+        .select("username fullName location preferredSports skillLevel createdAt")
+        .sort({ createdAt: -1 })
+        .limit(remaining)
+        .lean();
+
+      for (const u of recent) {
+        const id = toIdString(u?._id);
+        if (!id || pickedIds.has(id)) continue;
+        pickedIds.add(id);
+        suggestions.push(publicSuggestionUser(u));
+        if (suggestions.length >= limit) break;
+      }
+    }
+
+    return res.json({ suggestions });
   } catch (err) {
     console.error("GET /api/friends/suggestions error:", err);
     return res.status(500).json({ error: "Internal server error" });

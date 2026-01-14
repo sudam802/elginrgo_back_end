@@ -2,6 +2,7 @@ import { Router } from "express";
 import mongoose from "mongoose";
 import { requireAuth } from "../middleware/authMiddleware.js";
 import Event from "../models/Event.js";
+import EventLiveLocation from "../models/EventLiveLocation.js";
 import Friendship from "../models/friendship.js";
 import User from "../models/User.js";
 
@@ -28,6 +29,39 @@ function coordsFromGeo(geo) {
   const lat = Number(coords[1]);
   if (!Number.isFinite(lat) || !Number.isFinite(lng)) return null;
   return { lat, lng };
+}
+
+function parseLiveCoords(body) {
+  const lat = Number(body?.lat);
+  const lng = Number(body?.lng);
+  if (!Number.isFinite(lat) || !Number.isFinite(lng)) return null;
+  if (lat < -90 || lat > 90 || lng < -180 || lng > 180) return null;
+  const accuracy = body?.accuracy == null ? undefined : Number(body.accuracy);
+  const heading = body?.heading == null ? undefined : Number(body.heading);
+  const speed = body?.speed == null ? undefined : Number(body.speed);
+
+  return {
+    lat,
+    lng,
+    accuracy: Number.isFinite(accuracy) ? accuracy : undefined,
+    heading: Number.isFinite(heading) ? heading : undefined,
+    speed: Number.isFinite(speed) ? speed : undefined,
+  };
+}
+
+async function requireEventParticipant(eventId, meId) {
+  if (!mongoose.Types.ObjectId.isValid(eventId)) {
+    return { ok: false, status: 400, message: "Invalid eventId" };
+  }
+
+  const event = await Event.findById(eventId).select("participants createdBy").lean();
+  if (!event) return { ok: false, status: 404, message: "Event not found" };
+
+  const participants = Array.isArray(event.participants) ? event.participants.map(toIdString) : [];
+  const isParticipant = participants.includes(toIdString(meId));
+  if (!isParticipant) return { ok: false, status: 403, message: "Not a participant" };
+
+  return { ok: true, event };
 }
 
 async function acceptedFriendIds(meId) {
@@ -220,6 +254,13 @@ router.post("/:eventId/leave", requireAuth, async (req, res) => {
 
     event.participants = (event.participants || []).filter((p) => toIdString(p) !== meId);
     await event.save();
+
+    // Best-effort cleanup of any live location for this event.
+    try {
+      await EventLiveLocation.deleteOne({ eventId, userId: meId });
+    } catch {
+      // ignore
+    }
     return res.json({ status: "left" });
   } catch (err) {
     console.error("POST /api/events/:eventId/leave error:", err);
@@ -227,5 +268,107 @@ router.post("/:eventId/leave", requireAuth, async (req, res) => {
   }
 });
 
-export default router;
+// PUT /api/events/:eventId/live-location
+// Body: { lat, lng, accuracy?, heading?, speed? }
+router.put("/:eventId/live-location", requireAuth, async (req, res) => {
+  try {
+    const meId = toIdString(req.session.userId);
+    const eventId = toIdString(req.params?.eventId).trim();
+    const coords = parseLiveCoords(req.body);
+    if (!coords) return res.status(400).json({ message: "Invalid coordinates" });
 
+    const guard = await requireEventParticipant(eventId, meId);
+    if (!guard.ok) return res.status(guard.status).json({ message: guard.message });
+
+    await EventLiveLocation.findOneAndUpdate(
+      { eventId, userId: meId },
+      {
+        $set: {
+          eventId,
+          userId: meId,
+          lat: coords.lat,
+          lng: coords.lng,
+          accuracy: coords.accuracy,
+          heading: coords.heading,
+          speed: coords.speed,
+          updatedAt: new Date(),
+        },
+      },
+      { upsert: true, new: false }
+    );
+
+    return res.json({ status: "ok" });
+  } catch (err) {
+    console.error("PUT /api/events/:eventId/live-location error:", err);
+    return res.status(500).json({ error: "Internal server error" });
+  }
+});
+
+// DELETE /api/events/:eventId/live-location
+router.delete("/:eventId/live-location", requireAuth, async (req, res) => {
+  try {
+    const meId = toIdString(req.session.userId);
+    const eventId = toIdString(req.params?.eventId).trim();
+    const guard = await requireEventParticipant(eventId, meId);
+    if (!guard.ok) return res.status(guard.status).json({ message: guard.message });
+
+    await EventLiveLocation.deleteOne({ eventId, userId: meId });
+    return res.json({ status: "ok" });
+  } catch (err) {
+    console.error("DELETE /api/events/:eventId/live-location error:", err);
+    return res.status(500).json({ error: "Internal server error" });
+  }
+});
+
+// GET /api/events/:eventId/live-locations
+// Optional query: sinceSeconds=120
+router.get("/:eventId/live-locations", requireAuth, async (req, res) => {
+  try {
+    const meId = toIdString(req.session.userId);
+    const eventId = toIdString(req.params?.eventId).trim();
+    const guard = await requireEventParticipant(eventId, meId);
+    if (!guard.ok) return res.status(guard.status).json({ message: guard.message });
+
+    const sinceSecondsRaw = Number(req.query?.sinceSeconds ?? 120);
+    const sinceSeconds = Number.isFinite(sinceSecondsRaw) ? Math.max(5, Math.min(600, sinceSecondsRaw)) : 120;
+    const since = new Date(Date.now() - sinceSeconds * 1000);
+
+    const docs = await EventLiveLocation.find({
+      eventId,
+      updatedAt: { $gte: since },
+    })
+      .sort({ updatedAt: -1 })
+      .limit(100)
+      .lean();
+
+    const userIds = docs.map((d) => toIdString(d.userId)).filter(Boolean);
+    const users = userIds.length
+      ? await User.find({ _id: { $in: userIds } }).select("_id username email").lean()
+      : [];
+
+    const byId = new Map(users.map((u) => [toIdString(u._id), u]));
+
+    const locations = docs.map((d) => {
+      const userId = toIdString(d.userId);
+      const user = byId.get(userId);
+      return {
+        userId,
+        username: user?.username || user?.email || "Player",
+        lat: d.lat,
+        lng: d.lng,
+        accuracy: d.accuracy ?? null,
+        heading: d.heading ?? null,
+        speed: d.speed ?? null,
+        updatedAt: d.updatedAt,
+        isMe: userId === toIdString(meId),
+      };
+    });
+
+    return res.json({ eventId, sinceSeconds, locations });
+  } catch (err) {
+    console.error("GET /api/events/:eventId/live-locations error:", err);
+    return res.status(500).json({ error: "Internal server error" });
+  }
+});
+
+export default router;
